@@ -1,0 +1,79 @@
+name: Get VLESS Config from Codespace
+
+on:
+  workflow_dispatch:   # lets you run it manually
+
+jobs:
+  get-config:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo (required for gh CLI context)
+        uses: actions/checkout@v4
+
+      - name: Install GitHub CLI
+        run: |
+          type -p gh || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y)
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/id_ed25519.pub
+          chmod 600 ~/.ssh/id_ed25519
+          chmod 644 ~/.ssh/id_ed25519.pub
+          # add host config
+          cat << EOF >> ~/.ssh/config
+          Host *.ssh.github.com
+            User codespace
+            IdentityFile ~/.ssh/id_ed25519
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            LogLevel ERROR
+          EOF
+
+      - name: Authenticate with GitHub and add SSH key
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
+          # Add the public key to the account (it's already there from Step 3, but this makes sure)
+          gh ssh-key add ~/.ssh/id_ed25519.pub --title "actions-key-$(date +%s)" || echo "Key might already exist, continuing..."
+
+      - name: Create Codespace and run install script
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          # Create a codespace from your fork. Replace YOUR_USERNAME with your GitHub username.
+          REPO="A-A-Softs/g2ray"
+          echo "Creating Codespace for $REPO..."
+          gh codespace create -R "$REPO" -b main --machine basicLinux32gb 2>&1 | tee create.log
+
+          CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log || gh codespace list --repo "$REPO" -q '.[0].name')
+          if [ -z "$CODESPACE_NAME" ]; then
+            echo "Failed to capture Codespace name. Waiting 60s and trying again..."
+            sleep 60
+            CODESPACE_NAME=$(gh codespace list --repo "$REPO" -q '.[0].name')
+          fi
+          echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
+          echo "Waiting for Codespace to be ready..."
+          sleep 60
+
+      - name: SSH into Codespace and execute script
+        if: env.CODESPACE_NAME != ''
+        run: |
+          CODESPACE_NAME="${{ env.CODESPACE_NAME }}"
+          echo "Connecting to $CODESPACE_NAME..."
+          # We need to use the special SSH host format: codespace-name.ssh.github.com
+          ssh -o ConnectTimeout=30 codespace@${CODESPACE_NAME}.ssh.github.com "bash -c 'chmod +x install.sh && bash install.sh'" 2>&1 | tee install-output.txt
+          echo "--- SCRIPT FINISHED ---"
+          cat install-output.txt
+
+      - name: Extract VLESS link
+        if: env.CODESPACE_NAME != ''
+        run: |
+          echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
+          grep -oP '(vless|vmess|trojan)://[^ ]+' install-output.txt >> $GITHUB_STEP_SUMMARY || echo "No VLESS link found. Check the full log above."
