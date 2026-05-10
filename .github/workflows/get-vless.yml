@@ -50,7 +50,7 @@ jobs:
           # Create a codespace from your fork. Replace YOUR_USERNAME with your GitHub username.
           REPO="A-A-Softs/g2ray"
           echo "Creating Codespace for $REPO..."
-          gh codespace create -R "$REPO" -b main --machine basicLinux32gb 2>&1 | tee create.log
+          gh codespace create -R "$REPO" -b main --machine basic 2>&1 | tee create.log
 
           CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log || gh codespace list --repo "$REPO" -q '.[0].name')
           if [ -z "$CODESPACE_NAME" ]; then
