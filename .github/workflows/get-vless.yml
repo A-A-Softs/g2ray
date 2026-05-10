@@ -47,20 +47,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # Create a codespace from your fork. Replace YOUR_USERNAME with your GitHub username.
-          REPO="A-A-Softs/g2ray"
+          # Use your actual username here
+          REPO="YOUR_USERNAME/g2ray"
           echo "Creating Codespace for $REPO..."
           gh codespace create -R "$REPO" -b main --machine basic 2>&1 | tee create.log
-
-          CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log || gh codespace list --repo "$REPO" -q '.[0].name')
+          
+          CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log)
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "Failed to capture Codespace name. Waiting 60s and trying again..."
-            sleep 60
-            CODESPACE_NAME=$(gh codespace list --repo "$REPO" -q '.[0].name')
+            sleep 30
+            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
-          echo "Waiting for Codespace to be ready..."
-          sleep 60
+          echo "Waiting for Codespace to start..."
+          sleep 90   # increase wait time a bit
 
       - name: SSH into Codespace and execute script
         if: env.CODESPACE_NAME != ''
