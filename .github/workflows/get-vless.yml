@@ -48,7 +48,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           # Use your actual username here
-          REPO="YOUR_USERNAME/g2ray"
+          REPO="A-A-Softs/g2ray"
           echo "Creating Codespace for $REPO..."
           gh codespace create -R "$REPO" -b main --machine basic 2>&1 | tee create.log
           
