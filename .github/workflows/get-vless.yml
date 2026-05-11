@@ -67,7 +67,7 @@ jobs:
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
           echo "REPO=$REPO" >> $GITHUB_ENV
 
-      - name: Wait for Codespace readiness and run script
+      - name: Wait for Codespace and run install script
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -84,11 +84,11 @@ jobs:
             sleep 15
           done
           if [ "$STATE" != "Available" ]; then
-            echo "Codespace not ready in time."
+            echo "Codespace not ready."
             exit 1
           fi
-          echo "Running install.sh..."
-          gh codespace ssh -c "$CODESPACE_NAME" -- "chmod +x install.sh && bash install.sh" 2>&1 | tee install-output.txt
+          echo "Running install.sh from workspace..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "cd /workspaces/g2ray && chmod +x install.sh && bash install.sh" 2>&1 | tee install-output.txt
           echo "--- SCRIPT FINISHED ---"
           cat install-output.txt
 
