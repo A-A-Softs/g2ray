@@ -87,8 +87,8 @@ jobs:
             echo "Codespace not ready."
             exit 1
           fi
-          echo "Running install.sh from workspace..."
-          gh codespace ssh -c "$CODESPACE_NAME" -- "cd /workspaces/g2ray && chmod +x install.sh && bash install.sh" 2>&1 | tee install-output.txt
+          echo "Finding and running install.sh anywhere in /workspaces..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "find /workspaces -name install.sh -exec chmod +x {} \; -exec bash {} \;" 2>&1 | tee install-output.txt
           echo "--- SCRIPT FINISHED ---"
           cat install-output.txt
 
