@@ -47,17 +47,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          set -x  # Print every command before executing
-          echo "DEBUG: GH_TOKEN is set: [${GH_TOKEN:0:4}...]"
-          which gh || { echo "ERROR: gh not found"; exit 1; }
-          gh auth status
+          set +e                         # don't exit on error – we want to see the output
           REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace for $REPO..."
-          gh codespace create -R "$REPO" -b main --machine basic > create.log 2>&1
+          echo "Creating Codespace for $REPO using branch master..."
+          gh codespace create -R "$REPO" -b master --machine basicLinux > create.log 2>&1
           CREATE_EXIT_CODE=$?
-          echo "gh codespace create exit code: $CREATE_EXIT_CODE"
+          set -e                         # re-enable exit on error
+          echo "Exit code: $CREATE_EXIT_CODE"
           cat create.log
-          exit $CREATE_EXIT_CODE
+          # Continue only if creation succeeded
+          if [ $CREATE_EXIT_CODE -ne 0 ]; then
+            echo "FAILED: Codespace creation error (see above)."
+            exit 1
+          fi
+          CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log)
+          if [ -z "$CODESPACE_NAME" ]; then
+            sleep 30
+            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
+          fi
+          echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
+          echo "Waiting for Codespace to start..."
+          sleep 90
 
       - name: SSH into Codespace and execute script
         if: env.CODESPACE_NAME != ''
