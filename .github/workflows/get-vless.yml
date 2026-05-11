@@ -55,17 +55,16 @@ jobs:
           echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Prepare and run Xray inside Codespace
+      - name: Install Xray inside Codespace
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          UUID=$(cat /proc/sys/kernel/random/uuid)
           CODESPACE="${{ env.CODESPACE_NAME }}"
+          UUID=$(cat /proc/sys/kernel/random/uuid)
           echo "UUID=$UUID"
-          echo "Codespace: $CODESPACE"
 
-          # Wait for Codespace to be Available
+          # Wait for Codespace
           for i in {1..20}; do
             STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
             if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
@@ -73,15 +72,13 @@ jobs:
             sleep 15
           done
 
-          # Build a script that does everything inside the Codespace
-          SCRIPT=$(cat <<'SCRIPT_EOF'
-          #!/bin/bash
+          # Build inline script with UUID substitution
+          gh codespace ssh -c "$CODESPACE" -- "bash -s" << END_OF_SCRIPT
           set -e
-          UUID="$1"
-          echo "Running inside Codespace..."
+          UUID='$UUID'
 
           # Create config
-          cat > /tmp/config.json << EOF
+          cat > /tmp/config.json << 'XRAYCONF'
           {
             "log": { "loglevel": "warning" },
             "inbounds": [{
@@ -89,7 +86,7 @@ jobs:
               "listen": "0.0.0.0",
               "protocol": "vless",
               "settings": {
-                "clients": [{ "id": "$UUID" }],
+                "clients": [{ "id": "PLACEHOLDER_UUID" }],
                 "decryption": "none"
               },
               "streamSettings": {
@@ -100,12 +97,13 @@ jobs:
             }],
             "outbounds": [{ "protocol": "freedom" }]
           }
-          EOF
+          XRAYCONF
+          # Replace placeholder with the real UUID
+          sed -i "s/PLACEHOLDER_UUID/$UUID/" /tmp/config.json
 
           # Download Xray
-          XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
           echo "Downloading Xray..."
-          curl -L -o /tmp/xray.zip "$XRAY_URL"
+          curl -L -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
           cd /tmp
           unzip -o xray.zip
           chmod +x xray
@@ -114,24 +112,17 @@ jobs:
           echo "Starting Xray..."
           nohup ./xray run config.json > /tmp/xray.log 2>&1 &
           sleep 2
-          echo "Xray started (PID $!)"
-          SCRIPT_EOF
-          )
+          echo "Xray PID: \$!"
+          END_OF_SCRIPT
 
-          # Upload the script and execute it
-          echo "$SCRIPT" > script.sh
-          chmod +x script.sh
-          gh codespace ssh -c "$CODESPACE" -- "bash -s -- \"$UUID\" < script.sh" 2>&1 <<< "script.sh" || echo "Execution done"
-          echo "Script sent and executed."
-
-          # Wait for Xray to be ready
+          echo "Script finished inside Codespace."
           sleep 5
 
           # Make port public
           gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port visibility may have failed"
           sleep 10
 
-          # Build VLESS link and test
+          # Test
           VLESS_URL="${CODESPACE}-443.preview.app.github.dev"
           VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
@@ -147,13 +138,11 @@ jobs:
           if echo "$RESPONSE" | grep -qi "101"; then
             echo "✅ WebSocket upgrade successful!"
           elif echo "$RESPONSE" | grep -qi "404"; then
-            echo "❌ Still 404 – checking Xray log inside Codespace..."
+            echo "❌ Still 404 – getting Xray log..."
             gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log"
-          else
-            echo "❌ Unexpected response"
           fi
 
-          # Keep alive for 5 minutes
+          # Keep alive
           echo "Keeping alive for 5 minutes..."
           gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
 
