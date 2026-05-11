@@ -1,29 +1,21 @@
-name: Create VLESS with bore tunnel
+name: VLESS via IP-SNI
 
 on:
   workflow_dispatch:
 
 jobs:
-  final:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install tools
-        run: |
-          type -p gh || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-          && sudo apt update && sudo apt install -y gh curl)
+        run: sudo apt-get update && sudo apt-get install -y curl gh uuid-runtime jq
 
       - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/id_ed25519.pub
           chmod 600 ~/.ssh/id_ed25519
-          chmod 644 ~/.ssh/id_ed25519.pub
-          cat << EOF >> ~/.ssh/config
+          cat << 'EOF' >> ~/.ssh/config
           Host *.ssh.github.com
             User codespace
             IdentityFile ~/.ssh/id_ed25519
@@ -35,8 +27,171 @@ jobs:
       - name: Authenticate with GitHub
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
+
+      - name: Generate unique files and update fork
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
+          set -e
+          UUID=$(uuidgen)
+          NAME="g2ray-$(date +%s | sha256sum | base64 | head -c 6)"
+          REPO="A-A-Softs/g2ray"
+          BRANCH="master"
+          IP="94.130.50.12"   # main Codespaces ingress IP
+
+          # -------------------------------------------------
+          # Helper function to update/create a file via API
+          # -------------------------------------------------
+          upsert_file() {
+            local path="$1"
+            local content="$2"
+            local sha=$(gh api "repos/$REPO/contents/$path?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
+            local payload=$(jq -n --arg msg "Update $path" --arg content "$content" --arg branch "$BRANCH" \
+                             '{message: $msg, content: ($content | @base64), branch: $branch}')
+            if [ -n "$sha" ]; then
+              payload=$(echo "$payload" | jq --arg sha "$sha" '. + {sha: $sha}')
+            fi
+            gh api -X PUT "repos/$REPO/contents/$path" --input - <<< "$payload" > /dev/null
+            echo "Updated $path"
+          }
+
+          # ---- file contents ----
+          CONFIG_JSON=$(cat << XEOF
+          {
+            "log": { "loglevel": "warning", "access": "none", "error": "/tmp/xray-error.log" },
+            "dns": {
+              "servers": [
+                { "address": "https://1.1.1.1/dns-query", "domains": ["geosite:geolocation-!cn"], "queryStrategy": "UseIP" },
+                "8.8.8.8",
+                "localhost"
+              ],
+              "queryStrategy": "UseIPv4"
+            },
+            "inbounds": [{
+              "tag": "vless-in",
+              "port": 443,
+              "listen": "0.0.0.0",
+              "protocol": "vless",
+              "settings": {
+                "clients": [{ "id": "$UUID", "flow": "", "level": 0, "email": "user@$NAME" }],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "xhttp",
+                "security": "none",
+                "xhttpSettings": { "mode": "packet-up", "path": "/", "maxUploadSize": 1000000, "maxConcurrentUploads": 10 }
+              },
+              "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": false }
+            }],
+            "outbounds": [
+              { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4" } },
+              { "tag": "block", "protocol": "blackhole", "settings": { "response": { "type": "http" } } }
+            ],
+            "routing": {
+              "domainStrategy": "IPIfNonMatch",
+              "rules": [
+                { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" },
+                { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" },
+                { "type": "field", "domain": ["geosite:category-ads-all"], "outboundTag": "block" }
+              ]
+            },
+            "policy": {
+              "levels": {
+                "0": { "handshake": 4, "connIdle": 300, "uplinkOnly": 2, "downlinkOnly": 5, "bufferSize": 512 }
+              }
+            }
+          }
+          XEOF
+          )
+
+          SETUP_SH='#!/bin/sh
+          set -e
+          RELEASE="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+          TMPDIR="$(mktemp -d)"
+          echo "[g2ray] Downloading Xray v26.3.27..."
+          curl -sL "$RELEASE" -o "$TMPDIR/xray.zip"
+          unzip -q "$TMPDIR/xray.zip" -d "$TMPDIR"
+          install -m 755 "$TMPDIR/xray" /usr/local/bin/xray
+          echo "[g2ray] Downloading GeoIP and GeoSite..."
+          curl -sL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" -o /usr/local/bin/geoip.dat
+          curl -sL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" -o /usr/local/bin/geosite.dat
+          rm -rf "$TMPDIR"
+          echo "[g2ray] Done."'
+
+          DOCKERFILE="FROM debian:bookworm-slim
+          COPY setup.sh /tmp/setup.sh
+          COPY config.json /etc/xray/g2ray.json
+          COPY show-link.sh /usr/local/bin/show-link.sh
+          COPY start.sh /usr/local/bin/start.sh
+          RUN apt-get update \
+              && apt-get install -y --no-install-recommends \
+                 bash curl wget unzip ca-certificates openssl uuid-runtime tmux \
+              && rm -rf /var/lib/apt/lists/* \
+              && mkdir -p /etc/xray \
+              && chmod +x /tmp/setup.sh \
+              && /tmp/setup.sh \
+              && rm /tmp/setup.sh \
+              && chmod +x /usr/local/bin/show-link.sh \
+              && chmod +x /usr/local/bin/start.sh
+          EXPOSE 443
+          CMD [\"/usr/local/bin/xray\",\"run\",\"-c\",\"/etc/xray/g2ray.json\"]"
+
+          DEVCON_JSON=$(cat << XEOF
+          {
+            "name": "$NAME",
+            "build": { "dockerfile": "Dockerfile", "context": "." },
+            "features": {
+              "ghcr.io/devcontainers/features/common-utils:2": { "installZsh": false },
+              "ghcr.io/devcontainers/features/github-cli:1": { "version": "latest" }
+            },
+            "postAttachCommand": "gh codespace ports visibility 443:public -c $CODESPACE_NAME && bash /usr/local/bin/start.sh",
+            "portsAttributes": {
+              "443": { "label": "$NAME", "protocol": "http", "onAutoForward": "silent" }
+            },
+            "forwardPorts": [443],
+            "hostRequirements": { "cpus": 2 }
+          }
+          XEOF
+          )
+
+          SHOWLINK_SH=$(cat << 'XEOF'
+          #!/bin/bash
+          CONFIG="/etc/xray/g2ray.json"
+          UUID=$(grep -o '"id": *"[^"]*"' "$CONFIG" | head -1 | grep -o '"[^"]*"$' | tr -d '"')
+          if [ -z "$UUID" ]; then echo "[g2ray] UUID پیدا نشد."; exit 1; fi
+          SNI="${CODESPACE_NAME}-443.app.github.dev"
+          LINK="vless://${UUID}@94.130.50.12:443?encryption=none&security=tls&sni=${SNI}&host=${SNI}&fp=chrome&allowInsecure=1&type=xhttp&mode=packet-up&path=%2F#$NAME"
+          echo ""
+          echo "================================================"
+          echo "  $LINK"
+          echo "================================================"
+          echo ""
+          XEOF
+          )
+
+          START_SH=$(cat << 'XEOF'
+          #!/bin/bash
+          # g2ray start script
+          tmux kill-session -t g2ray 2>/dev/null || true
+          tmux new-session -d -s g2ray
+          tmux send-keys -t g2ray "sudo /usr/local/bin/xray run -c /etc/xray/g2ray.json &>/tmp/xray.log" Enter
+          sleep 2
+          show-link.sh
+          echo "[g2ray] سرور داخل tmux اجرا شد"
+          XEOF
+          )
+
+          # Update all files
+          upsert_file ".devcontainer/config.json" "$CONFIG_JSON"
+          upsert_file ".devcontainer/setup.sh" "$SETUP_SH"
+          upsert_file ".devcontainer/Dockerfile" "$DOCKERFILE"
+          upsert_file ".devcontainer/devcontainer.json" "$DEVCON_JSON"
+          upsert_file ".devcontainer/show-link.sh" "$SHOWLINK_SH"
+          upsert_file ".devcontainer/start.sh" "$START_SH"
+
+          echo "UUID=$UUID"
+          echo "Files updated."
 
       - name: Create Codespace
         id: create
@@ -44,7 +199,6 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace..."
           gh codespace create -R "$REPO" -b master --machine basicLinux32gb > create.log 2>&1
           cat create.log
           CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
@@ -55,98 +209,32 @@ jobs:
           echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Setup Xray and tunnel with bore
+      - name: Wait for Codespace and get link
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE="${{ env.CODESPACE_NAME }}"
-          UUID=$(cat /proc/sys/kernel/random/uuid)
-          echo "UUID=$UUID"
-
-          # Wait for Codespace
+          echo "Waiting for Codespace $CODESPACE to be ready..."
           for i in {1..20}; do
             STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
             if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
-            echo "State: $STATE – waiting..."
             sleep 15
           done
 
-          # Install Xray inside Codespace
-          gh codespace ssh -c "$CODESPACE" -- "bash -s" << END_INSTALL
-          set -e
-          UUID='$UUID'
-          cat > /tmp/config.json << 'XRAYCONF'
-          {
-            "log": { "loglevel": "warning" },
-            "inbounds": [{
-              "port": 443,
-              "listen": "0.0.0.0",
-              "protocol": "vless",
-              "settings": {
-                "clients": [{ "id": "PLACEHOLDER_UUID" }],
-                "decryption": "none"
-              },
-              "streamSettings": {
-                "network": "ws",
-                "wsSettings": { "path": "/ws" },
-                "security": "none"
-              }
-            }],
-            "outbounds": [{ "protocol": "freedom" }]
-          }
-          XRAYCONF
-          sed -i "s/PLACEHOLDER_UUID/$UUID/" /tmp/config.json
-          curl -L -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
-          cd /tmp && unzip -o xray.zip && chmod +x xray
-          nohup ./xray run config.json > /tmp/xray.log 2>&1 &
-          sleep 2
-          echo "Xray started"
-          END_INSTALL
+          # Wait a little more for Xray to start
+          echo "Waiting 30 seconds for Xray and port visibility..."
+          sleep 30
 
-          echo "Installing bore..."
-          gh codespace ssh -c "$CODESPACE" -- "curl -L -o /tmp/bore https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz && cd /tmp && tar xzf bore && chmod +x bore"
-
-          echo "Starting bore tunnel on port 443..."
-          gh codespace ssh -c "$CODESPACE" -- "nohup /tmp/bore local 443 --to bore.pub > /tmp/bore.log 2>&1 &"
-          sleep 5
-
-          echo "Extracting bore public address..."
-          PUBLIC_ADDR=$(gh codespace ssh -c "$CODESPACE" -- "grep -o 'bore.pub:[0-9]*' /tmp/bore.log | tail -1")
-          if [ -z "$PUBLIC_ADDR" ]; then
-            echo "Trying again..."
-            sleep 5
-            PUBLIC_ADDR=$(gh codespace ssh -c "$CODESPACE" -- "grep -o 'bore.pub:[0-9]*' /tmp/bore.log | tail -1")
-          fi
-          if [ -z "$PUBLIC_ADDR" ]; then
-            echo "Could not get bore address, falling back to direct Codespace URL (might be blocked)"
-            PUBLIC_ADDR="${CODESPACE}-443.preview.app.github.dev:443"
-          else
-            echo "Bore tunnel established at $PUBLIC_ADDR"
-          fi
-
-          # Build VLESS link with the tunnel address (port is already included in PUBLIC_ADDR)
-          VLESS_LINK="vless://${UUID}@${PUBLIC_ADDR}?encryption=none&security=none&type=ws&path=/ws#g2ray"
-          echo "VLESS link: $VLESS_LINK"
-          echo "$VLESS_LINK" > vless-link.txt
+          echo "Extracting VLESS link..."
+          gh codespace ssh -c "$CODESPACE" -- "bash show-link.sh" 2>&1 | tee link.txt
+          LINK=$(grep -o 'vless://[^ ]*' link.txt)
+          echo "VLESS link: $LINK"
+          echo "$LINK" > vless-link.txt
           echo "### VLESS Config:" >> $GITHUB_STEP_SUMMARY
-          echo "$VLESS_LINK" >> $GITHUB_STEP_SUMMARY
+          echo "$LINK" >> $GITHUB_STEP_SUMMARY
 
-          echo "Testing connection through bore tunnel..."
-          set +e
-          RESPONSE=$(curl -sk --max-time 15 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://${PUBLIC_ADDR}/ws" 2>&1)
-          set -e
-          echo "Response: $RESPONSE"
-          if echo "$RESPONSE" | grep -qi "101"; then
-            echo "✅ Tunnel is working!"
-          else
-            echo "⚠️ Tunnel test failed, but may still work from your client. Check manually."
-          fi
-
-          echo "Keeping alive for 5 minutes..."
-          gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
-
-      - name: Output link
+      - name: Output final link
         if: env.CODESPACE_NAME != ''
         run: |
           echo "### Final VLESS Config:"
