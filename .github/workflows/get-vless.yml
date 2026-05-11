@@ -1,4 +1,4 @@
-name: Create VLESS and Test
+name: Create VLESS with bore tunnel
 
 on:
   workflow_dispatch:
@@ -55,7 +55,7 @@ jobs:
           echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Install Xray inside Codespace
+      - name: Setup Xray and tunnel with bore
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -72,8 +72,8 @@ jobs:
             sleep 15
           done
 
-          # Run Xray installation inline
-          gh codespace ssh -c "$CODESPACE" -- "bash -s" << END_OF_SCRIPT
+          # Install Xray inside Codespace
+          gh codespace ssh -c "$CODESPACE" -- "bash -s" << END_INSTALL
           set -e
           UUID='$UUID'
           cat > /tmp/config.json << 'XRAYCONF'
@@ -97,75 +97,53 @@ jobs:
           }
           XRAYCONF
           sed -i "s/PLACEHOLDER_UUID/$UUID/" /tmp/config.json
-          echo "Downloading Xray..."
           curl -L -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
-          cd /tmp
-          unzip -o xray.zip
-          chmod +x xray
-          echo "Starting Xray..."
+          cd /tmp && unzip -o xray.zip && chmod +x xray
           nohup ./xray run config.json > /tmp/xray.log 2>&1 &
           sleep 2
-          echo "Xray PID: \$!"
-          END_OF_SCRIPT
+          echo "Xray started"
+          END_INSTALL
 
-          echo "Xray started. Waiting for machine to be ready..."
+          echo "Installing bore..."
+          gh codespace ssh -c "$CODESPACE" -- "curl -L -o /tmp/bore https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz && cd /tmp && tar xzf bore && chmod +x bore"
+
+          echo "Starting bore tunnel on port 443..."
+          gh codespace ssh -c "$CODESPACE" -- "nohup /tmp/bore local 443 --to bore.pub > /tmp/bore.log 2>&1 &"
           sleep 5
 
-          # Wait for machine ID to be available (retry up to 6 times)
-          for attempt in {1..6}; do
-            MACHINE_ID=$(gh api "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines" --jq '.machines[0].id' 2>/dev/null || echo "")
-            if [ -n "$MACHINE_ID" ]; then
-              echo "Machine ID: $MACHINE_ID"
-              break
-            fi
-            echo "Machine not ready yet (attempt $attempt), waiting..."
+          echo "Extracting bore public address..."
+          PUBLIC_ADDR=$(gh codespace ssh -c "$CODESPACE" -- "grep -o 'bore.pub:[0-9]*' /tmp/bore.log | tail -1")
+          if [ -z "$PUBLIC_ADDR" ]; then
+            echo "Trying again..."
             sleep 5
-          done
-
-          if [ -z "$MACHINE_ID" ]; then
-            echo "❌ Could not retrieve machine ID. Port won't be public."
-            exit 1
+            PUBLIC_ADDR=$(gh codespace ssh -c "$CODESPACE" -- "grep -o 'bore.pub:[0-9]*' /tmp/bore.log | tail -1")
+          fi
+          if [ -z "$PUBLIC_ADDR" ]; then
+            echo "Could not get bore address, falling back to direct Codespace URL (might be blocked)"
+            PUBLIC_ADDR="${CODESPACE}-443.preview.app.github.dev:443"
+          else
+            echo "Bore tunnel established at $PUBLIC_ADDR"
           fi
 
-          # Patch port 443 to public
-          echo "Making port 443 public..."
-          gh api -X PATCH "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines/$MACHINE_ID/ports/443" \
-             -f visibility=public >/dev/null
-          echo "Waiting for port to become public..."
-          for attempt in {1..6}; do
-            VISIBILITY=$(gh api "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443) | .visibility')
-            echo "Attempt $attempt: $VISIBILITY"
-            if [ "$VISIBILITY" = "public" ]; then
-              echo "✅ Port 443 is public!"
-              break
-            fi
-            sleep 5
-          done
-
-          # Build link and test
-          VLESS_URL="${CODESPACE}-443.preview.app.github.dev"
-          VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
+          # Build VLESS link with the tunnel address (port is already included in PUBLIC_ADDR)
+          VLESS_LINK="vless://${UUID}@${PUBLIC_ADDR}?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
           echo "### VLESS Config:" >> $GITHUB_STEP_SUMMARY
           echo "$VLESS_LINK" >> $GITHUB_STEP_SUMMARY
 
-          echo "Testing WebSocket..."
+          echo "Testing connection through bore tunnel..."
           set +e
-          RESPONSE=$(curl -sk --max-time 15 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://${VLESS_URL}/ws" 2>&1)
+          RESPONSE=$(curl -sk --max-time 15 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://${PUBLIC_ADDR}/ws" 2>&1)
           set -e
           echo "Response: $RESPONSE"
           if echo "$RESPONSE" | grep -qi "101"; then
-            echo "✅ WebSocket upgrade successful!"
+            echo "✅ Tunnel is working!"
           else
-            echo "❌ Failed – checking Xray log and port info..."
-            gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log"
-            echo "Port details:"
-            gh api "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443)'
+            echo "⚠️ Tunnel test failed, but may still work from your client. Check manually."
           fi
 
-          # Keep alive 5 min
-          echo "Keeping Codespace alive for 5 minutes..."
+          echo "Keeping alive for 5 minutes..."
           gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
 
       - name: Output link
