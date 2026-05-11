@@ -98,17 +98,14 @@ jobs:
             "outbounds": [{ "protocol": "freedom" }]
           }
           XRAYCONF
-          # Replace placeholder with the real UUID
           sed -i "s/PLACEHOLDER_UUID/$UUID/" /tmp/config.json
 
-          # Download Xray
           echo "Downloading Xray..."
           curl -L -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
           cd /tmp
           unzip -o xray.zip
           chmod +x xray
 
-          # Start Xray
           echo "Starting Xray..."
           nohup ./xray run config.json > /tmp/xray.log 2>&1 &
           sleep 2
@@ -118,9 +115,10 @@ jobs:
           echo "Script finished inside Codespace."
           sleep 5
 
-          # Make port public AND WAIT FOR CONFIRMATION
-          echo "Publishing port 443..."
-          gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port visibility command failed"
+          # Make port public using forward command (the correct way)
+          echo "Forwarding port 443 as public..."
+          gh codespace ports forward 443:443 -c "$CODESPACE" --visibility public || echo "Forward command failed"
+          # Wait for port to become public
           for attempt in {1..6}; do
             VISIBILITY=$(gh codespace ports list -c "$CODESPACE" --json label,visibility -q ".[] | select(.label==\"443\") | .visibility")
             echo "Attempt $attempt: port visibility = $VISIBILITY"
