@@ -60,18 +60,23 @@ jobs:
           if [ -z "$CODESPACE_NAME" ]; then
             echo "Fallback: waiting and listing..."
             sleep 30
-            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
+            CODESPACE_TEMP=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
+            CODESPACE_NAME=$CODESPACE_TEMP
           fi
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
           echo "REPO=$REPO" >> $GITHUB_ENV
 
-      - name: Run script, extract UUID, and build VLESS link
+      - name: Generate UUID and run install.sh
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE_NAME="${{ env.CODESPACE_NAME }}"
           REPO="${{ env.REPO }}"
+
+          # Generate a proper UUID on the Actions runner
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          echo "Generated UUID: $UUID"
 
           echo "Waiting for Codespace $CODESPACE_NAME to become ready..."
           for i in {1..20}; do
@@ -88,23 +93,20 @@ jobs:
             exit 1
           fi
 
-          echo "Running install.sh (found with find)..."
-          gh codespace ssh -c "$CODESPACE_NAME" -- "export GH_TOKEN=${{ secrets.PAT_TOKEN }}; find /workspaces -name install.sh -execdir chmod +x {} \; -execdir bash {} \;" 2>&1 | tee install-output.txt
+          echo "Running install.sh with predefined UUID..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "export UUID='$UUID'; export GH_TOKEN=${{ secrets.PAT_TOKEN }}; find /workspaces -name install.sh -execdir bash {} \;" 2>&1 | tee install-output.txt
 
-          echo "Extracting UUID from config.json..."
-          set +e  # don't fail if UUID extraction fails
-          UUID=$(gh codespace ssh -c "$CODESPACE_NAME" -- "find /workspaces -name config.json -exec grep -oP '(?<=\"id\": \")[^\"]+' {} \;" 2>&1)
-          if [ -z "$UUID" ]; then
-            # Older version of install.sh might store UUID in a different location
-            UUID=$(gh codespace ssh -c "$CODESPACE_NAME" -- "cat /root/config.json 2>/dev/null | grep -oP '(?<=\"id\": \")[^\"]+'" 2>&1 || true)
-          fi
-          set -e
-          echo "UUID: $UUID"
-          if [ -z "$UUID" ]; then
-            echo "ERROR: Could not extract UUID."
-            exit 1
-          fi
+          # Wait a moment for the service to start
+          sleep 5
 
+          # If the script didn't use our UUID, force it into config.json
+          echo "Ensuring config.json contains our UUID..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "find /workspaces -name config.json -exec sed -i 's/\"id\": *\"[^\"]*\"/\"id\": \"$UUID\"/' {} \;"
+
+          # Restart xray to pick up the new UUID (if running)
+          gh codespace ssh -c "$CODESPACE_NAME" -- "pkill xray || true; sleep 1; cd /workspaces/g2ray && nohup ./xray run config.json > /dev/null 2>&1 &" 2>&1 || echo "Service restart attempted"
+
+          # Construct the link
           VLESS_LINK="vless://${UUID}@${CODESPACE_NAME}-443.preview.app.github.dev:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
