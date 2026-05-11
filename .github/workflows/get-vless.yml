@@ -115,16 +115,16 @@ jobs:
           echo "Script finished inside Codespace."
           sleep 5
 
-          # ---- Public port via GitHub API (source of truth) ----
-          echo "Getting machine name via API..."
-          MACHINE_NAME=$(gh api "user/codespaces/$CODESPACE/machines" --jq '.machines[0].name')
-          echo "Machine: $MACHINE_NAME"
-          echo "Setting port 443 to public via API..."
-          gh api -X PATCH "user/codespaces/$CODESPACE/machines/$MACHINE_NAME/ports/443" \
+          # ---- Public port via GitHub API (correct machine ID) ----
+          echo "Getting machine ID via API..."
+          MACHINE_ID=$(gh api "user/codespaces/$CODESPACE/machines" --jq '.machines[0].id')
+          echo "Machine ID: $MACHINE_ID"
+          echo "Patching port 443 to public..."
+          gh api -X PATCH "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports/443" \
              -f visibility=public >/dev/null
           echo "Waiting for port to become public..."
           for attempt in {1..6}; do
-            VISIBILITY=$(gh api "user/codespaces/$CODESPACE/machines/$MACHINE_NAME/ports" --jq '.[] | select(.port==443) | .visibility')
+            VISIBILITY=$(gh api "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443) | .visibility')
             echo "Attempt $attempt: visibility = $VISIBILITY"
             if [ "$VISIBILITY" = "public" ]; then
               echo "✅ Port 443 is now public!"
@@ -153,7 +153,7 @@ jobs:
             echo "❌ Failed – checking Xray log and port visibility..."
             gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log"
             echo "Current port visibility from API:"
-            gh api "user/codespaces/$CODESPACE/machines/$MACHINE_NAME/ports" --jq '.[] | select(.port==443)'
+            gh api "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443)'
           fi
 
           # Keep alive for 5 minutes
