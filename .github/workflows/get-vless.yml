@@ -56,16 +56,18 @@ jobs:
           echo "Exit code: $CREATE_EXIT_CODE"
           cat create.log
           if [ $CREATE_EXIT_CODE -ne 0 ]; then
-            echo "FAILED: see error above"
+            echo "FAILED: Codespace creation error."
             exit 1
           fi
-          CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log)
+          # Extract the codespace name (it's the last line of the output)
+          CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
           if [ -z "$CODESPACE_NAME" ]; then
+            echo "Trying fallback via gh codespace list..."
             sleep 30
             CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
-          echo "Waiting for Codespace to start..."
+          echo "Waiting for Codespace to start (90s)..."
           sleep 90
 
       - name: SSH into Codespace and execute script
