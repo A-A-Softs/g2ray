@@ -1,14 +1,13 @@
 name: Get VLESS Config from Codespace
 
 on:
-  workflow_dispatch:   # lets you run it manually
+  workflow_dispatch:
 
 jobs:
   get-config:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the repo (required for gh CLI context)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install GitHub CLI
         run: |
@@ -25,7 +24,6 @@ jobs:
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/id_ed25519.pub
           chmod 600 ~/.ssh/id_ed25519
           chmod 644 ~/.ssh/id_ed25519.pub
-          # add host config
           cat << EOF >> ~/.ssh/config
           Host *.ssh.github.com
             User codespace
@@ -35,21 +33,22 @@ jobs:
             LogLevel ERROR
           EOF
 
-      - name: Authenticate with GitHub and add SSH key
+      - name: Authenticate with GitHub
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
-          # Add the public key to the account (it's already there from Step 3, but this makes sure)
-          gh ssh-key add ~/.ssh/id_ed25519.pub --title "actions-key-$(date +%s)" || echo "Key might already exist, continuing..."
+          # Adding SSH key via gh fails due to missing admin:public_key scope,
+          # but the key was manually added to your account – that’s enough.
+          echo "SSH key already added manually – skipping gh ssh-key add."
 
-      - name: Create Codespace and run install script
+      - name: Create Codespace
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set +e
           REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace for $REPO on branch master with machine basicLinux32gb..."
+          echo "Creating Codespace for $REPO on master with basicLinux32gb..."
           gh codespace create -R "$REPO" -b master --machine basicLinux32gb > create.log 2>&1
           CREATE_EXIT_CODE=$?
           set -e
@@ -59,7 +58,6 @@ jobs:
             echo "FAILED: Codespace creation error."
             exit 1
           fi
-          # Extract the codespace name (it's the last line of the output)
           CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
           if [ -z "$CODESPACE_NAME" ]; then
             echo "Trying fallback via gh codespace list..."
@@ -67,16 +65,30 @@ jobs:
             CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
-          echo "Waiting for Codespace to start (90s)..."
-          sleep 90
+          echo "REPO=$REPO" >> $GITHUB_ENV
 
-      - name: SSH into Codespace and execute script
+      - name: Wait for Codespace readiness and run script
         if: env.CODESPACE_NAME != ''
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE_NAME="${{ env.CODESPACE_NAME }}"
-          echo "Connecting to $CODESPACE_NAME..."
-          # We need to use the special SSH host format: codespace-name.ssh.github.com
-          ssh -o ConnectTimeout=30 codespace@${CODESPACE_NAME}.ssh.github.com "bash -c 'chmod +x install.sh && bash install.sh'" 2>&1 | tee install-output.txt
+          echo "Waiting for Codespace $CODESPACE_NAME to become ready..."
+          for i in {1..20}; do
+            STATE=$(gh codespace list --repo "${{ env.REPO }}" --json name,state -q ".[] | select(.name==\"$CODESPACE_NAME\") | .state")
+            if [ "$STATE" = "Available" ]; then
+              echo "Ready!"
+              break
+            fi
+            echo "State: $STATE – waiting 15s..."
+            sleep 15
+          done
+          if [ "$STATE" != "Available" ]; then
+            echo "Codespace not ready in time."
+            exit 1
+          fi
+          echo "Running install.sh..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "chmod +x install.sh && bash install.sh" 2>&1 | tee install-output.txt
           echo "--- SCRIPT FINISHED ---"
           cat install-output.txt
 
@@ -84,4 +96,4 @@ jobs:
         if: env.CODESPACE_NAME != ''
         run: |
           echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
-          grep -oP '(vless|vmess|trojan)://[^ ]+' install-output.txt >> $GITHUB_STEP_SUMMARY || echo "No VLESS link found. Check the full log above."
+          grep -oP '(vless|vmess|trojan)://[^ ]+' install-output.txt >> $GITHUB_STEP_SUMMARY || echo "No VLESS link found. Check full log."
