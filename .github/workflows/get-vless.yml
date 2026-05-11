@@ -67,15 +67,16 @@ jobs:
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
           echo "REPO=$REPO" >> $GITHUB_ENV
 
-      - name: Wait for Codespace and run install script
+      - name: Wait for Codespace, run install, and get link
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE_NAME="${{ env.CODESPACE_NAME }}"
+          REPO="${{ env.REPO }}"
           echo "Waiting for Codespace $CODESPACE_NAME to become ready..."
           for i in {1..20}; do
-            STATE=$(gh codespace list --repo "${{ env.REPO }}" --json name,state -q ".[] | select(.name==\"$CODESPACE_NAME\") | .state")
+            STATE=$(gh codespace list --repo "$REPO" --json name,state -q ".[] | select(.name==\"$CODESPACE_NAME\") | .state")
             if [ "$STATE" = "Available" ]; then
               echo "Ready!"
               break
@@ -87,10 +88,26 @@ jobs:
             echo "Codespace not ready."
             exit 1
           fi
-          echo "Running install.sh with GH_TOKEN..."
-          gh codespace ssh -c "$CODESPACE_NAME" -- "export GH_TOKEN=${{ secrets.PAT_TOKEN }}; find /workspaces -name install.sh -execdir chmod +x {} \; -execdir bash {} \;" 2>&1 | tee install-output.txt
-          echo "--- SCRIPT FINISHED ---"
-          cat install-output.txt
+
+          # Run install.sh, but don't rely on its echo of the link
+          echo "Running install.sh..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "export GH_TOKEN=${{ secrets.PAT_TOKEN }}; cd /workspaces/g2ray && chmod +x install.sh && bash install.sh" 2>&1 | tee install-output.txt
+
+          echo "--- extracting UUID from config ---"
+          # Read the UUID from config.json inside the Codespace
+          UUID=$(gh codespace ssh -c "$CODESPACE_NAME" -- "cat /workspaces/g2ray/config.json | grep -oP '(?<=\"id\": \")[^\"]+'" 2>&1)
+          echo "UUID: $UUID"
+
+          # Construct the link
+          VLESS_LINK="vless://${UUID}@${CODESPACE_NAME}-443.preview.app.github.dev:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
+          echo "VLESS link: $VLESS_LINK"
+          echo "$VLESS_LINK" > vless-link.txt
+
+      - name: Show and save link
+        if: env.CODESPACE_NAME != ''
+        run: |
+          echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
+          cat vless-link.txt >> $GITHUB_STEP_SUMMARY
 
       - name: Extract VLESS link
         if: env.CODESPACE_NAME != ''
