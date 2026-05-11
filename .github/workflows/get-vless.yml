@@ -72,12 +72,10 @@ jobs:
             sleep 15
           done
 
-          # Build inline script with UUID substitution
+          # Run Xray installation inline
           gh codespace ssh -c "$CODESPACE" -- "bash -s" << END_OF_SCRIPT
           set -e
           UUID='$UUID'
-
-          # Create config
           cat > /tmp/config.json << 'XRAYCONF'
           {
             "log": { "loglevel": "warning" },
@@ -99,42 +97,52 @@ jobs:
           }
           XRAYCONF
           sed -i "s/PLACEHOLDER_UUID/$UUID/" /tmp/config.json
-
           echo "Downloading Xray..."
           curl -L -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
           cd /tmp
           unzip -o xray.zip
           chmod +x xray
-
           echo "Starting Xray..."
           nohup ./xray run config.json > /tmp/xray.log 2>&1 &
           sleep 2
           echo "Xray PID: \$!"
           END_OF_SCRIPT
 
-          echo "Script finished inside Codespace."
+          echo "Xray started. Waiting for machine to be ready..."
           sleep 5
 
-          # ---- Public port via GitHub API (correct machine ID) ----
-          echo "Getting machine ID via API..."
-          MACHINE_ID=$(gh api "user/codespaces/$CODESPACE/machines" --jq '.machines[0].id')
-          echo "Machine ID: $MACHINE_ID"
-          echo "Patching port 443 to public..."
-          gh api -X PATCH "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports/443" \
+          # Wait for machine ID to be available (retry up to 6 times)
+          for attempt in {1..6}; do
+            MACHINE_ID=$(gh api "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines" --jq '.machines[0].id' 2>/dev/null || echo "")
+            if [ -n "$MACHINE_ID" ]; then
+              echo "Machine ID: $MACHINE_ID"
+              break
+            fi
+            echo "Machine not ready yet (attempt $attempt), waiting..."
+            sleep 5
+          done
+
+          if [ -z "$MACHINE_ID" ]; then
+            echo "❌ Could not retrieve machine ID. Port won't be public."
+            exit 1
+          fi
+
+          # Patch port 443 to public
+          echo "Making port 443 public..."
+          gh api -X PATCH "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines/$MACHINE_ID/ports/443" \
              -f visibility=public >/dev/null
           echo "Waiting for port to become public..."
           for attempt in {1..6}; do
-            VISIBILITY=$(gh api "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443) | .visibility')
-            echo "Attempt $attempt: visibility = $VISIBILITY"
+            VISIBILITY=$(gh api "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443) | .visibility')
+            echo "Attempt $attempt: $VISIBILITY"
             if [ "$VISIBILITY" = "public" ]; then
-              echo "✅ Port 443 is now public!"
+              echo "✅ Port 443 is public!"
               break
             fi
             sleep 5
           done
-          sleep 5
 
-          # Build VLESS link and test
+          # Build link and test
           VLESS_URL="${CODESPACE}-443.preview.app.github.dev"
           VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
@@ -150,14 +158,14 @@ jobs:
           if echo "$RESPONSE" | grep -qi "101"; then
             echo "✅ WebSocket upgrade successful!"
           else
-            echo "❌ Failed – checking Xray log and port visibility..."
+            echo "❌ Failed – checking Xray log and port info..."
             gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log"
-            echo "Current port visibility from API:"
-            gh api "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443)'
+            echo "Port details:"
+            gh api "repos/A-A-Softs/g2ray/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443)'
           fi
 
-          # Keep alive for 5 minutes
-          echo "Keeping alive for 5 minutes..."
+          # Keep alive 5 min
+          echo "Keeping Codespace alive for 5 minutes..."
           gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
 
       - name: Output link
