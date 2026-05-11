@@ -47,17 +47,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          set +e                         # don't exit on error – we want to see the output
+          set +e
           REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace for $REPO using branch master..."
-          gh codespace create -R "$REPO" -b master --machine basicLinux > create.log 2>&1
+          echo "Creating Codespace for $REPO on branch master with machine basicLinux32gb..."
+          gh codespace create -R "$REPO" -b master --machine basicLinux32gb > create.log 2>&1
           CREATE_EXIT_CODE=$?
-          set -e                         # re-enable exit on error
+          set -e
           echo "Exit code: $CREATE_EXIT_CODE"
           cat create.log
-          # Continue only if creation succeeded
           if [ $CREATE_EXIT_CODE -ne 0 ]; then
-            echo "FAILED: Codespace creation error (see above)."
+            echo "FAILED: see error above"
             exit 1
           fi
           CODESPACE_NAME=$(grep -oP 'Created codespace \K\S+' create.log)
