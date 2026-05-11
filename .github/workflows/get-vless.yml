@@ -60,13 +60,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          CODESPACE="${{ env.CODESPACE_NAME }}"
+          CODESPACE_HOST="${{ env.CODESPACE_NAME }}.ssh.github.com"
           UUID=$(cat /proc/sys/kernel/random/uuid)
           echo "UUID=$UUID"
 
           # Wait for available
           for i in {1..20}; do
-            STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
+            STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"${{ env.CODESPACE_NAME }}\") | .state")
             if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
             echo "State: $STATE, waiting..."
             sleep 15
@@ -94,31 +94,31 @@ jobs:
           }
           EOF
 
-          # Download Xray binary (same version install.sh uses)
+          # Download Xray binary
           XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
           echo "Downloading Xray..."
           curl -L -o xray.zip "$XRAY_URL"
           unzip -o xray.zip
           chmod +x xray
 
-          # Upload config and binary to Codespace
-          gh codespace ssh -c "$CODESPACE" -- "mkdir -p /tmp/xray"
-          gh codespace cp config.json "codespace:$CODESPACE:/tmp/xray/config.json"
-          gh codespace cp xray "codespace:$CODESPACE:/tmp/xray/xray"
-          gh codespace cp geoip.dat "codespace:$CODESPACE:/tmp/xray/geoip.dat" 2>/dev/null || echo "geoip.dat not needed for basic"
-          gh codespace cp geosite.dat "codespace:$CODESPACE:/tmp/xray/geosite.dat" 2>/dev/null || echo "geosite.dat not needed"
+          # Upload files using SCP (reliable)
+          ssh -o ConnectTimeout=30 codespace@${CODESPACE_HOST} "mkdir -p /tmp/xray"
+          scp config.json codespace@${CODESPACE_HOST}:/tmp/xray/
+          scp xray codespace@${CODESPACE_HOST}:/tmp/xray/
+          scp geoip.dat codespace@${CODESPACE_HOST}:/tmp/xray/ 2>/dev/null || echo "geoip not needed"
+          scp geosite.dat codespace@${CODESPACE_HOST}:/tmp/xray/ 2>/dev/null || echo "geosite not needed"
 
-          # Start Xray on port 443 inside Codespace
+          # Start Xray
           echo "Starting Xray..."
-          gh codespace ssh -c "$CODESPACE" -- "cd /tmp/xray && chmod +x xray && nohup ./xray run config.json > xray.log 2>&1 &"
+          ssh codespace@${CODESPACE_HOST} "cd /tmp/xray && chmod +x xray && nohup ./xray run config.json > xray.log 2>&1 &"
           sleep 5
 
-          # Make port public (requires admin:public_key scope on PAT)
-          gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port visibility failed (may need admin:public_key scope)"
+          # Make port public
+          gh codespace ports visibility 443:public -c "${{ env.CODESPACE_NAME }}" || echo "Port visibility command failed"
           sleep 10
 
           # Test
-          VLESS_URL="${CODESPACE}-443.preview.app.github.dev"
+          VLESS_URL="${{ env.CODESPACE_NAME }}-443.preview.app.github.dev"
           VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
@@ -134,14 +134,12 @@ jobs:
           if echo "$RESPONSE" | grep -qi "101"; then
             echo "✅ WebSocket upgrade successful!"
           elif echo "$RESPONSE" | grep -qi "404"; then
-            echo "❌ Still 404 – Xray may not have started. Checking log..."
-            gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray/xray.log"
+            echo "❌ Still 404 – checking Xray log..."
+            ssh codespace@${CODESPACE_HOST} "cat /tmp/xray/xray.log"
           else
             echo "❌ Unexpected response"
           fi
 
           # Keep alive for 5 minutes
-          echo "Keeping alive for 5 minutes..."
-          gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
-          echo "SSH available: ssh -i yourkey codespace@${CODESPACE}.ssh.github.com"
-          wait
+          echo "Keeping alive for 5 minutes... (you can SSH now)"
+          ssh codespace@${CODESPACE_HOST} "sleep 300" &
