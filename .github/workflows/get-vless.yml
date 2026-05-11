@@ -1,21 +1,21 @@
-name: Get VLESS Config from Codespace
+name: Create VLESS and Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  get-config:
+  create-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install GitHub CLI
+      - name: Install GitHub CLI and curl
         run: |
           type -p gh || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
           && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
           && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-          && sudo apt update \
-          && sudo apt install gh -y)
+          && sudo apt update && sudo apt install gh -y)
+          sudo apt install -y curl
 
       - name: Set up SSH
         run: |
@@ -38,83 +38,78 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
-          echo "SSH key already added manually – skipping gh ssh-key add."
+          echo "SSH key added manually, skip."
 
       - name: Create Codespace
+        id: create
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          set +e
           REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace for $REPO on master with basicLinux32gb..."
+          echo "Creating Codespace for $REPO..."
           gh codespace create -R "$REPO" -b master --machine basicLinux32gb > create.log 2>&1
-          CREATE_EXIT_CODE=$?
-          set -e
-          echo "Exit code: $CREATE_EXIT_CODE"
           cat create.log
-          if [ $CREATE_EXIT_CODE -ne 0 ]; then
-            echo "FAILED: Codespace creation error."
-            exit 1
-          fi
           CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "Fallback: waiting and listing..."
             sleep 30
-            CODESPACE_TEMP=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
-            CODESPACE_NAME=$CODESPACE_TEMP
+            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
+          echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
-          echo "REPO=$REPO" >> $GITHUB_ENV
 
-      - name: Generate UUID and run install.sh
+      - name: Wait, inject UUID, run install, and test
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE_NAME="${{ env.CODESPACE_NAME }}"
-          REPO="${{ env.REPO }}"
-
-          # Generate a proper UUID on the Actions runner
+          REPO="A-A-Softs/g2ray"
+          # Generate UUID
           UUID=$(cat /proc/sys/kernel/random/uuid)
-          echo "Generated UUID: $UUID"
+          echo "UUID=$UUID"
 
-          echo "Waiting for Codespace $CODESPACE_NAME to become ready..."
+          # Wait for available
           for i in {1..20}; do
             STATE=$(gh codespace list --repo "$REPO" --json name,state -q ".[] | select(.name==\"$CODESPACE_NAME\") | .state")
-            if [ "$STATE" = "Available" ]; then
-              echo "Ready!"
-              break
-            fi
-            echo "State: $STATE – waiting 15s..."
+            if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
+            echo "State: $STATE, waiting..."
             sleep 15
           done
-          if [ "$STATE" != "Available" ]; then
-            echo "Codespace not ready."
-            exit 1
-          fi
 
-          echo "Running install.sh with predefined UUID..."
-          gh codespace ssh -c "$CODESPACE_NAME" -- "export UUID='$UUID'; export GH_TOKEN=${{ secrets.PAT_TOKEN }}; find /workspaces -name install.sh -execdir bash {} \;" 2>&1 | tee install-output.txt
+          # Run install with UUID
+          gh codespace ssh -c "$CODESPACE_NAME" -- "export UUID='$UUID'; export GH_TOKEN=${{ secrets.PAT_TOKEN }}; find /workspaces -name install.sh -execdir bash {} \;" 2>&1 | tee install.log
 
-          # Wait a moment for the service to start
-          sleep 5
-
-          # If the script didn't use our UUID, force it into config.json
-          echo "Ensuring config.json contains our UUID..."
+          # Force UUID into config.json if not already
           gh codespace ssh -c "$CODESPACE_NAME" -- "find /workspaces -name config.json -exec sed -i 's/\"id\": *\"[^\"]*\"/\"id\": \"$UUID\"/' {} \;"
 
-          # Restart xray to pick up the new UUID (if running)
-          gh codespace ssh -c "$CODESPACE_NAME" -- "pkill xray || true; sleep 1; cd /workspaces/g2ray && nohup ./xray run config.json > /dev/null 2>&1 &" 2>&1 || echo "Service restart attempted"
+          # Restart Xray
+          gh codespace ssh -c "$CODESPACE_NAME" -- "pkill xray || true; sleep 1; cd /workspaces/g2ray && nohup ./xray run config.json > /dev/null 2>&1 &"
+          echo "Waiting 10s for Xray to start..."
+          sleep 10
 
-          # Construct the link
-          VLESS_LINK="vless://${UUID}@${CODESPACE_NAME}-443.preview.app.github.dev:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
+          # Build link
+          VLESS_URL="${CODESPACE_NAME}-443.preview.app.github.dev"
+          VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
-          echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
+          echo "### VLESS Config:" >> $GITHUB_STEP_SUMMARY
           echo "$VLESS_LINK" >> $GITHUB_STEP_SUMMARY
 
-      - name: Output VLESS link
-        if: env.CODESPACE_NAME != ''
-        run: |
-          echo "### Final VLESS Config Link:"
-          cat vless-link.txt
+          # ---- TEST CONNECTIVITY ----
+          echo "Testing WebSocket endpoint at $VLESS_URL:443/ws ..."
+          # Use curl to check WebSocket upgrade
+          WS_RESPONSE=$(curl -sv --max-time 15 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://${VLESS_URL}/ws" 2>&1)
+          echo "Response: $WS_RESPONSE"
+          if echo "$WS_RESPONSE" | grep -qi "101 Switching"; then
+            echo "✅ WebSocket endpoint is working! Your proxy should be reachable."
+          else
+            echo "❌ WebSocket endpoint NOT reachable or not responding correctly. Check GitHub Codespaces port visibility or firewall."
+          fi
+
+          # Keep the session alive for 5 minutes so you can test manually
+          echo "Keeping session alive for 5 minutes (you can ssh now)..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "sleep 300" &
+          SSH_PID=$!
+          sleep 5
+          echo "You can connect to the Codespace via SSH: ssh -i yourkey codespace@${CODESPACE_NAME}.ssh.github.com"
+          wait $SSH_PID || true
