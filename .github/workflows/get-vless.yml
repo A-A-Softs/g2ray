@@ -55,25 +55,33 @@ jobs:
           echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Setup Xray directly and test
+      - name: Prepare and run Xray inside Codespace
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          CODESPACE_HOST="${{ env.CODESPACE_NAME }}.ssh.github.com"
           UUID=$(cat /proc/sys/kernel/random/uuid)
+          CODESPACE="${{ env.CODESPACE_NAME }}"
           echo "UUID=$UUID"
+          echo "Codespace: $CODESPACE"
 
-          # Wait for available
+          # Wait for Codespace to be Available
           for i in {1..20}; do
-            STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"${{ env.CODESPACE_NAME }}\") | .state")
+            STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
             if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
-            echo "State: $STATE, waiting..."
+            echo "State: $STATE – waiting..."
             sleep 15
           done
 
-          # Create config.json locally
-          cat > config.json << EOF
+          # Build a script that does everything inside the Codespace
+          SCRIPT=$(cat <<'SCRIPT_EOF'
+          #!/bin/bash
+          set -e
+          UUID="$1"
+          echo "Running inside Codespace..."
+
+          # Create config
+          cat > /tmp/config.json << EOF
           {
             "log": { "loglevel": "warning" },
             "inbounds": [{
@@ -94,31 +102,37 @@ jobs:
           }
           EOF
 
-          # Download Xray binary
+          # Download Xray
           XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
           echo "Downloading Xray..."
-          curl -L -o xray.zip "$XRAY_URL"
+          curl -L -o /tmp/xray.zip "$XRAY_URL"
+          cd /tmp
           unzip -o xray.zip
           chmod +x xray
 
-          # Upload files using SCP (reliable)
-          ssh -o ConnectTimeout=30 codespace@${CODESPACE_HOST} "mkdir -p /tmp/xray"
-          scp config.json codespace@${CODESPACE_HOST}:/tmp/xray/
-          scp xray codespace@${CODESPACE_HOST}:/tmp/xray/
-          scp geoip.dat codespace@${CODESPACE_HOST}:/tmp/xray/ 2>/dev/null || echo "geoip not needed"
-          scp geosite.dat codespace@${CODESPACE_HOST}:/tmp/xray/ 2>/dev/null || echo "geosite not needed"
-
           # Start Xray
           echo "Starting Xray..."
-          ssh codespace@${CODESPACE_HOST} "cd /tmp/xray && chmod +x xray && nohup ./xray run config.json > xray.log 2>&1 &"
+          nohup ./xray run config.json > /tmp/xray.log 2>&1 &
+          sleep 2
+          echo "Xray started (PID $!)"
+          SCRIPT_EOF
+          )
+
+          # Upload the script and execute it
+          echo "$SCRIPT" > script.sh
+          chmod +x script.sh
+          gh codespace ssh -c "$CODESPACE" -- "bash -s -- \"$UUID\" < script.sh" 2>&1 <<< "script.sh" || echo "Execution done"
+          echo "Script sent and executed."
+
+          # Wait for Xray to be ready
           sleep 5
 
           # Make port public
-          gh codespace ports visibility 443:public -c "${{ env.CODESPACE_NAME }}" || echo "Port visibility command failed"
+          gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port visibility may have failed"
           sleep 10
 
-          # Test
-          VLESS_URL="${{ env.CODESPACE_NAME }}-443.preview.app.github.dev"
+          # Build VLESS link and test
+          VLESS_URL="${CODESPACE}-443.preview.app.github.dev"
           VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
@@ -128,18 +142,23 @@ jobs:
           echo "Testing WebSocket..."
           set +e
           RESPONSE=$(curl -sk --max-time 15 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://${VLESS_URL}/ws" 2>&1)
-          CURL_EXIT=$?
           set -e
           echo "Response: $RESPONSE"
           if echo "$RESPONSE" | grep -qi "101"; then
             echo "✅ WebSocket upgrade successful!"
           elif echo "$RESPONSE" | grep -qi "404"; then
-            echo "❌ Still 404 – checking Xray log..."
-            ssh codespace@${CODESPACE_HOST} "cat /tmp/xray/xray.log"
+            echo "❌ Still 404 – checking Xray log inside Codespace..."
+            gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log"
           else
             echo "❌ Unexpected response"
           fi
 
           # Keep alive for 5 minutes
-          echo "Keeping alive for 5 minutes... (you can SSH now)"
-          ssh codespace@${CODESPACE_HOST} "sleep 300" &
+          echo "Keeping alive for 5 minutes..."
+          gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
+
+      - name: Output link
+        if: env.CODESPACE_NAME != ''
+        run: |
+          echo "### Final VLESS Config:"
+          cat vless-link.txt
