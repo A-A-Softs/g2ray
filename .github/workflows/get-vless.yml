@@ -38,8 +38,6 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
-          # Adding SSH key via gh fails due to missing admin:public_key scope,
-          # but the key was manually added to your account – that’s enough.
           echo "SSH key already added manually – skipping gh ssh-key add."
 
       - name: Create Codespace
@@ -60,20 +58,21 @@ jobs:
           fi
           CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "Trying fallback via gh codespace list..."
+            echo "Fallback: waiting and listing..."
             sleep 30
             CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
           echo "REPO=$REPO" >> $GITHUB_ENV
 
-      - name: Wait for Codespace, run install, and get link
+      - name: Run script, extract UUID, and build VLESS link
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE_NAME="${{ env.CODESPACE_NAME }}"
           REPO="${{ env.REPO }}"
+
           echo "Waiting for Codespace $CODESPACE_NAME to become ready..."
           for i in {1..20}; do
             STATE=$(gh codespace list --repo "$REPO" --json name,state -q ".[] | select(.name==\"$CODESPACE_NAME\") | .state")
@@ -89,28 +88,31 @@ jobs:
             exit 1
           fi
 
-          # Run install.sh, but don't rely on its echo of the link
-          echo "Running install.sh..."
-          gh codespace ssh -c "$CODESPACE_NAME" -- "export GH_TOKEN=${{ secrets.PAT_TOKEN }}; cd /workspaces/g2ray && chmod +x install.sh && bash install.sh" 2>&1 | tee install-output.txt
+          echo "Running install.sh (found with find)..."
+          gh codespace ssh -c "$CODESPACE_NAME" -- "export GH_TOKEN=${{ secrets.PAT_TOKEN }}; find /workspaces -name install.sh -execdir chmod +x {} \; -execdir bash {} \;" 2>&1 | tee install-output.txt
 
-          echo "--- extracting UUID from config ---"
-          # Read the UUID from config.json inside the Codespace
-          UUID=$(gh codespace ssh -c "$CODESPACE_NAME" -- "cat /workspaces/g2ray/config.json | grep -oP '(?<=\"id\": \")[^\"]+'" 2>&1)
+          echo "Extracting UUID from config.json..."
+          set +e  # don't fail if UUID extraction fails
+          UUID=$(gh codespace ssh -c "$CODESPACE_NAME" -- "find /workspaces -name config.json -exec grep -oP '(?<=\"id\": \")[^\"]+' {} \;" 2>&1)
+          if [ -z "$UUID" ]; then
+            # Older version of install.sh might store UUID in a different location
+            UUID=$(gh codespace ssh -c "$CODESPACE_NAME" -- "cat /root/config.json 2>/dev/null | grep -oP '(?<=\"id\": \")[^\"]+'" 2>&1 || true)
+          fi
+          set -e
           echo "UUID: $UUID"
+          if [ -z "$UUID" ]; then
+            echo "ERROR: Could not extract UUID."
+            exit 1
+          fi
 
-          # Construct the link
           VLESS_LINK="vless://${UUID}@${CODESPACE_NAME}-443.preview.app.github.dev:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
+          echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
+          echo "$VLESS_LINK" >> $GITHUB_STEP_SUMMARY
 
-      - name: Show and save link
+      - name: Output VLESS link
         if: env.CODESPACE_NAME != ''
         run: |
-          echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
-          cat vless-link.txt >> $GITHUB_STEP_SUMMARY
-
-      - name: Extract VLESS link
-        if: env.CODESPACE_NAME != ''
-        run: |
-          echo "### VLESS Config Link:" >> $GITHUB_STEP_SUMMARY
-          grep -oP '(vless|vmess|trojan)://[^ ]+' install-output.txt >> $GITHUB_STEP_SUMMARY || echo "No VLESS link found. Check full log."
+          echo "### Final VLESS Config Link:"
+          cat vless-link.txt
