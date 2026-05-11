@@ -1,60 +1,3 @@
-name: Create VLESS and Test
-
-on:
-  workflow_dispatch:
-
-jobs:
-  final:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install tools
-        run: |
-          type -p gh || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-          && sudo apt update && sudo apt install -y gh curl)
-
-      - name: Set up SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/id_ed25519.pub
-          chmod 600 ~/.ssh/id_ed25519
-          chmod 644 ~/.ssh/id_ed25519.pub
-          cat << EOF >> ~/.ssh/config
-          Host *.ssh.github.com
-            User codespace
-            IdentityFile ~/.ssh/id_ed25519
-            StrictHostKeyChecking no
-            UserKnownHostsFile=/dev/null
-            LogLevel ERROR
-          EOF
-
-      - name: Authenticate with GitHub
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
-
-      - name: Create Codespace
-        id: create
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace..."
-          gh codespace create -R "$REPO" -b master --machine basicLinux32gb > create.log 2>&1
-          cat create.log
-          CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
-          if [ -z "$CODESPACE_NAME" ]; then
-            sleep 30
-            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
-          fi
-          echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
-          echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
-
       - name: Install Xray inside Codespace
         if: env.CODESPACE_NAME != ''
         env:
@@ -118,11 +61,21 @@ jobs:
           echo "Script finished inside Codespace."
           sleep 5
 
-          # Make port public
-          gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port visibility may have failed"
-          sleep 10
+          # Make port public AND WAIT FOR CONFIRMATION
+          echo "Publishing port 443..."
+          gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port visibility command failed"
+          for attempt in {1..6}; do
+            VISIBILITY=$(gh codespace ports list -c "$CODESPACE" --json label,visibility -q ".[] | select(.label==\"443\") | .visibility")
+            echo "Attempt $attempt: port visibility = $VISIBILITY"
+            if [ "$VISIBILITY" = "public" ]; then
+              echo "✅ Port 443 is now public!"
+              break
+            fi
+            sleep 5
+          done
+          sleep 5
 
-          # Test
+          # Build VLESS link and test
           VLESS_URL="${CODESPACE}-443.preview.app.github.dev"
           VLESS_LINK="vless://${UUID}@${VLESS_URL}:443?encryption=none&security=none&type=ws&path=/ws#g2ray"
           echo "VLESS link: $VLESS_LINK"
@@ -138,16 +91,12 @@ jobs:
           if echo "$RESPONSE" | grep -qi "101"; then
             echo "✅ WebSocket upgrade successful!"
           elif echo "$RESPONSE" | grep -qi "404"; then
-            echo "❌ Still 404 – getting Xray log..."
+            echo "❌ Still 404 – checking Xray log and port status..."
             gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log"
+            echo "Current port visibility:"
+            gh codespace ports list -c "$CODESPACE"
           fi
 
-          # Keep alive
+          # Keep alive for 5 minutes
           echo "Keeping alive for 5 minutes..."
           gh codespace ssh -c "$CODESPACE" -- "sleep 300" &
-
-      - name: Output link
-        if: env.CODESPACE_NAME != ''
-        run: |
-          echo "### Final VLESS Config:"
-          cat vless-link.txt
