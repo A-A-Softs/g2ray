@@ -43,7 +43,7 @@ jobs:
           gh codespace create -R "$REPO" -b master --machine basicLinux32gb | tee create.log
           CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "No codespace name detected, waiting and listing..."
+            echo "Fallback: waiting and listing..."
             sleep 30
             CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
@@ -63,19 +63,18 @@ jobs:
             sleep 15
           done
 
-          # Make port 443 public (token has read:org, admin:public_key now)
+          # Public port 443 (only -c, no --repo)
           echo "Making port 443 public..."
-          gh codespace ports visibility 443:public -c "$CODESPACE" --repo "A-A-Softs/g2ray" || echo "Port may already be public"
+          gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Port may already be public"
 
-          # Start Xray (show-link.sh will be called inside start.sh)
+          # Start Xray (start.sh calls show-link.sh which prints link)
           echo "Starting Xray..."
           gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/start.sh"
 
-          # Extract the link from show-link.sh (it prints to stdout)
+          # Get the link from the output
           echo "Retrieving VLESS link..."
           LINK=$(gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/show-link.sh" 2>/dev/null | grep -o 'vless://[^ ]*')
           if [ -z "$LINK" ]; then
-            echo "Failed to get link automatically. Trying to read from /tmp/link or manual..."
             LINK=$(gh codespace ssh -c "$CODESPACE" -- "cat /tmp/link 2>/dev/null" | grep -o 'vless://[^ ]*')
           fi
           echo "VLESS link: $LINK"
