@@ -1,5 +1,5 @@
 {
-  "name": "g2ray-64b4df",
+  "name": "g2ray-51b19d",
   "build": { "dockerfile": "Dockerfile", "context": "." },
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": { "installZsh": false },
@@ -8,7 +8,7 @@
   },
   "postAttachCommand": "gh codespace ports visibility 443:public -c $CODESPACE_NAME && bash /usr/local/bin/start.sh",
   "portsAttributes": {
-    "443": { "label": "g2ray-64b4df", "protocol": "http", "onAutoForward": "silent" }
+    "443": { "label": "g2ray-51b19d", "protocol": "http", "onAutoForward": "silent" }
   },
   "forwardPorts": [443],
   "hostRequirements": { "cpus": 2 }
