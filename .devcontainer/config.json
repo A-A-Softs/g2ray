@@ -5,7 +5,7 @@
     "listen": "0.0.0.0",
     "protocol": "vless",
     "settings": {
-      "clients": [{ "id": "ca1cef0d-b20e-48e3-8ea9-a02d0661edc5" }],
+      "clients": [{ "id": "f8e004b5-882c-42f8-9395-e7b639f3a59b" }],
       "decryption": "none"
     },
     "streamSettings": {
