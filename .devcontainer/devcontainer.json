@@ -1,9 +1,8 @@
 {
-  "name": "g2ray-65a947",
+  "name": "g2ray-3b4376",
   "build": { "dockerfile": "Dockerfile", "context": "." },
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": { "installZsh": false },
-    "ghcr.io/devcontainers/features/github-cli:1": { "version": "latest" },
     "ghcr.io/devcontainers/features/sshd:1": { "version": "latest" }
   },
   "forwardPorts": [443],
