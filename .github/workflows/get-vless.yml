@@ -1,10 +1,10 @@
-name: Just Create CodeSpace and Get Link
+name: Create and Get VLESS
 
 on:
   workflow_dispatch:
 
 jobs:
-  get-link:
+  create-and-get:
     runs-on: ubuntu-latest
     steps:
       - name: Install gh
@@ -39,51 +39,49 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace for $REPO..."
-          gh codespace create -R "$REPO" -b master --machine basicLinux32gb -v 2>&1 | tee create.log
+          echo "Creating Codespace..."
+          gh codespace create -R "$REPO" -b master --machine basicLinux32gb | tee create.log
           CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
           if [ -z "$CODESPACE_NAME" ]; then
-            echo "Waiting 30s and retrying..."
+            echo "No codespace name detected, waiting and listing..."
             sleep 30
             CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
           fi
           echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Wait, public port, and start Xray
+      - name: Wait, public port, start Xray, and get link
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           CODESPACE="${{ env.CODESPACE_NAME }}"
-          echo "Waiting for Codespace $CODESPACE..."
+          echo "Waiting for $CODESPACE to be ready..."
           for i in {1..20}; do
             STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
             if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
             sleep 15
           done
 
-          # Make port public
+          # Make port 443 public (token has read:org, admin:public_key now)
           echo "Making port 443 public..."
-          gh codespace ports visibility 443:public -c "$CODESPACE" --repo "A-A-Softs/g2ray" || echo "Could not make port public (maybe already public)"
+          gh codespace ports visibility 443:public -c "$CODESPACE" --repo "A-A-Softs/g2ray" || echo "Port may already be public"
 
-          # Start Xray
+          # Start Xray (show-link.sh will be called inside start.sh)
           echo "Starting Xray..."
           gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/start.sh"
 
-          # Extract UUID from config inside Codespace
-          UUID=$(gh codespace ssh -c "$CODESPACE" -- "grep -oP '(?<=\"id\": \")[^\"]+' /etc/xray/g2ray.json" 2>/dev/null)
-          if [ -z "$UUID" ]; then
-            echo "Failed to get UUID from Codespace. Using fallback (manual input needed)."
-            UUID="YOUR_UUID_HERE"
+          # Extract the link from show-link.sh (it prints to stdout)
+          echo "Retrieving VLESS link..."
+          LINK=$(gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/show-link.sh" 2>/dev/null | grep -o 'vless://[^ ]*')
+          if [ -z "$LINK" ]; then
+            echo "Failed to get link automatically. Trying to read from /tmp/link or manual..."
+            LINK=$(gh codespace ssh -c "$CODESPACE" -- "cat /tmp/link 2>/dev/null" | grep -o 'vless://[^ ]*')
           fi
-
-          SNI="${CODESPACE}-443.app.github.dev"
-          VLESS_LINK="vless://${UUID}@94.130.50.12:443?encryption=none&security=tls&sni=${SNI}&host=${SNI}&fp=chrome&allowInsecure=1&type=xhttp&mode=packet-up&path=%2F#g2ray"
-          echo "VLESS link: $VLESS_LINK"
-          echo "$VLESS_LINK" > vless-link.txt
+          echo "VLESS link: $LINK"
+          echo "$LINK" > vless-link.txt
           echo "### VLESS Config:" >> $GITHUB_STEP_SUMMARY
-          echo "$VLESS_LINK" >> $GITHUB_STEP_SUMMARY
+          echo "$LINK" >> $GITHUB_STEP_SUMMARY
 
       - name: Output final link
         if: env.CODESPACE_NAME != ''
