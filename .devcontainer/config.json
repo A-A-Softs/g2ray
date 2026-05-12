@@ -14,7 +14,7 @@
     "listen": "0.0.0.0",
     "protocol": "vless",
     "settings": {
-      "clients": [{ "id": "3ebbacfe-ab2c-4079-b9de-a15662e3a211", "flow": "", "level": 0, "email": "user@g2ray-0e7b41" }],
+      "clients": [{ "id": "40db753e-58d4-4cb6-ad8b-671a97931566", "flow": "", "level": 0, "email": "user@g2ray-64b4df" }],
       "decryption": "none"
     },
     "streamSettings": {
