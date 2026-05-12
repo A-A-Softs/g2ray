@@ -1,4 +1,4 @@
-name: VLESS via IP-SNI
+name: VLESS via IP-SNI (final)
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
 
-      - name: Generate unique files, update fork, and store UUID
+      - name: Generate unique files, update fork, store UUID
         id: generate
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -53,7 +53,7 @@ jobs:
             echo "Updated $path"
           }
 
-          # ---- file contents (same as before, just escaping \$CODESPACE_NAME properly) ----
+          # --- CONFIG.JSON (from generator, with UUID/NAME) ---
           CONFIG_JSON=$(cat << XEOF
           {
             "log": { "loglevel": "warning", "access": "none", "error": "/tmp/xray-error.log" },
@@ -102,10 +102,41 @@ jobs:
           XEOF
           )
 
-          SETUP_SH="... کد setup.sh قبلی ..."
-          DOCKERFILE="... کد Dockerfile قبلی ..."
+          # --- SETUP.SH (from generator) ---
+          SETUP_SH='#!/bin/sh
+          set -e
+          RELEASE="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+          TMPDIR="$(mktemp -d)"
+          echo "[g2ray] Downloading Xray v26.3.27..."
+          curl -sL "$RELEASE" -o "$TMPDIR/xray.zip"
+          unzip -q "$TMPDIR/xray.zip" -d "$TMPDIR"
+          install -m 755 "$TMPDIR/xray" /usr/local/bin/xray
+          echo "[g2ray] Downloading GeoIP and GeoSite..."
+          curl -sL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" -o /usr/local/bin/geoip.dat
+          curl -sL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" -o /usr/local/bin/geosite.dat
+          rm -rf "$TMPDIR"
+          echo "[g2ray] Done."'
 
-          # devcontainer.json with escaped \$CODESPACE_NAME
+          # --- DOCKERFILE (from generator) ---
+          DOCKERFILE="FROM debian:bookworm-slim
+          COPY setup.sh /tmp/setup.sh
+          COPY config.json /etc/xray/g2ray.json
+          COPY show-link.sh /usr/local/bin/show-link.sh
+          COPY start.sh /usr/local/bin/start.sh
+          RUN apt-get update \
+              && apt-get install -y --no-install-recommends \
+                 bash curl wget unzip ca-certificates openssl uuid-runtime tmux \
+              && rm -rf /var/lib/apt/lists/* \
+              && mkdir -p /etc/xray \
+              && chmod +x /tmp/setup.sh \
+              && /tmp/setup.sh \
+              && rm /tmp/setup.sh \
+              && chmod +x /usr/local/bin/show-link.sh \
+              && chmod +x /usr/local/bin/start.sh
+          EXPOSE 443
+          CMD [\"/usr/local/bin/xray\",\"run\",\"-c\",\"/etc/xray/g2ray.json\"]"
+
+          # --- DEVCONTAINER.JSON (with escaped \$CODESPACE_NAME) ---
           DEVCON_JSON=$(cat << XEOF
           {
             "name": "$NAME",
@@ -125,6 +156,7 @@ jobs:
           XEOF
           )
 
+          # --- SHOWLINK.SH (with argument) ---
           SHOWLINK_SH=$(cat << 'XEOF'
           #!/bin/bash
           CODESPACE_NAME_FROM_ARG="$1"
@@ -141,7 +173,17 @@ jobs:
           XEOF
           )
 
-          START_SH="... کد start.sh قبلی ..."
+          # --- START.SH (from generator) ---
+          START_SH=$(cat << 'XEOF'
+          #!/bin/bash
+          tmux kill-session -t g2ray 2>/dev/null || true
+          tmux new-session -d -s g2ray
+          tmux send-keys -t g2ray "sudo /usr/local/bin/xray run -c /etc/xray/g2ray.json &>/tmp/xray.log" Enter
+          sleep 2
+          show-link.sh
+          echo "[g2ray] سرور داخل tmux اجرا شد"
+          XEOF
+          )
 
           upsert_file ".devcontainer/config.json" "$CONFIG_JSON"
           upsert_file ".devcontainer/setup.sh" "$SETUP_SH"
@@ -150,7 +192,6 @@ jobs:
           upsert_file ".devcontainer/show-link.sh" "$SHOWLINK_SH"
           upsert_file ".devcontainer/start.sh" "$START_SH"
 
-          # Store UUID for later steps
           echo "uuid=$UUID" >> $GITHUB_OUTPUT
           echo "UUID=$UUID" >> $GITHUB_ENV
 
@@ -170,7 +211,7 @@ jobs:
           echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
           echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Wait for Codespace and build VLESS link
+      - name: Wait, test, and build link
         if: env.CODESPACE_NAME != ''
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -184,12 +225,29 @@ jobs:
             sleep 15
           done
 
-          # Wait for Xray and port visibility
-          echo "Waiting 40s for Xray and port visibility..."
-          sleep 40
+          echo "Waiting 60s for Xray + port visibility..."
+          sleep 60
 
-          # Build the link directly with the known UUID and codespace name
           SNI="${CODESPACE}-443.app.github.dev"
+          echo "Testing connection to $SNI..."
+
+          # Test using curl with SNI and HTTP/2
+          set +e
+          CURL_OUT=$(curl -svk --resolve "${SNI}:443:94.130.50.12" --http2 "https://${SNI}/" 2>&1)
+          CURL_EXIT=$?
+          set -e
+          echo "$CURL_OUT"
+
+          if [[ $CURL_EXIT -eq 0 ]] && echo "$CURL_OUT" | grep -q "HTTP/2 200"; then
+            echo "✅ Server is reachable and responding! Your proxy should work."
+          elif echo "$CURL_OUT" | grep -q "tls"; then
+            echo "⚠️ TLS handshake succeeded but no HTTP response. Xray may need more time."
+          else
+            echo "❌ Connection failed. The port may not be public or Xray not running."
+            echo "Checking Xray log inside Codespace..."
+            gh codespace ssh -c "$CODESPACE" -- "cat /tmp/xray.log || echo 'No log found'"
+          fi
+
           VLESS_LINK="vless://${UUID}@94.130.50.12:443?encryption=none&security=tls&sni=${SNI}&host=${SNI}&fp=chrome&allowInsecure=1&type=xhttp&mode=packet-up&path=%2F#g2ray"
           echo "VLESS link: $VLESS_LINK"
           echo "$VLESS_LINK" > vless-link.txt
