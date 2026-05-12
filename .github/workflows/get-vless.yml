@@ -1,10 +1,14 @@
-name: VLESS Generator
+name: Get VLESS from Existing Codespace
 
 on:
   workflow_dispatch:
+    inputs:
+      codespace_name:
+        description: 'اسم Codespace (مثال: friendly-succotash-r6445g6x6rr2pvjw)'
+        required: true
 
 jobs:
-  deploy:
+  get-link:
     runs-on: ubuntu-latest
     steps:
       - name: Install gh
@@ -33,51 +37,50 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
 
-      - name: Create Codespace
-        id: create
+      - name: Start Codespace if needed
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          REPO="A-A-Softs/g2ray"
-          echo "Creating Codespace..."
-          gh codespace create -R "$REPO" -b master --machine basicLinux32gb | tee create.log
-          CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
-          if [ -z "$CODESPACE_NAME" ]; then
-            sleep 30
-            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
+          NAME="${{ inputs.codespace_name }}"
+          echo "Ensuring Codespace $NAME is running..."
+          STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$NAME\") | .state")
+          if [ "$STATE" != "Available" ]; then
+            echo "Starting codespace..."
+            gh codespace start -c "$NAME"
+            # Wait until Available
+            for i in {1..20}; do
+              STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$NAME\") | .state")
+              if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
+              sleep 10
+            done
+          else
+            echo "Already running."
           fi
-          echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
-          echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
 
-      - name: Wait, public port, start Xray, get link
-        if: env.CODESPACE_NAME != ''
+      - name: Public port, start Xray, get link
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          CODESPACE="${{ env.CODESPACE_NAME }}"
-          echo "Waiting for $CODESPACE..."
-          for i in {1..20}; do
-            STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
-            if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
-            sleep 15
-          done
+          NAME="${{ inputs.codespace_name }}"
+          echo "Making port 443 public..."
+          gh codespace ports visibility 443:public -c "$NAME" --repo "A-A-Softs/g2ray"
 
-          # Make port 443 public (token now has all scopes)
-          gh codespace ports visibility 443:public -c "$CODESPACE"
+          echo "Starting Xray and getting link..."
+          # مهم: CODESPACE_NAME رو قبل از اجرا ست می‌کنیم تا لینک SNI درست داشته باشه
+          OUTPUT=$(gh codespace ssh -c "$NAME" -- "export CODESPACE_NAME='$NAME'; bash /usr/local/bin/start.sh")
+          echo "$OUTPUT"
 
-          # Start Xray (this will also print VLESS link)
-          echo "Starting Xray..."
-          gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/start.sh"
-
-          # Extract link from show-link.sh output
-          LINK=$(gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/show-link.sh" 2>/dev/null | grep -o 'vless://[^ ]*')
+          # استخراج لینک VLESS از خروجی
+          LINK=$(echo "$OUTPUT" | grep -o 'vless://[^ ]*')
+          if [ -z "$LINK" ]; then
+            LINK=$(gh codespace ssh -c "$NAME" -- "export CODESPACE_NAME='$NAME'; bash /usr/local/bin/show-link.sh" 2>/dev/null | grep -o 'vless://[^ ]*')
+          fi
           echo "VLESS link: $LINK"
           echo "$LINK" > vless-link.txt
           echo "### VLESS Config:" >> $GITHUB_STEP_SUMMARY
           echo "$LINK" >> $GITHUB_STEP_SUMMARY
 
       - name: Output final link
-        if: env.CODESPACE_NAME != ''
         run: |
           echo "### Final VLESS Config:"
           cat vless-link.txt
