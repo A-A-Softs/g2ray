@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       codespace_name:
-        description: 'اسم Codespace (مثال: friendly-succotash-r6445g6x6rr2pvjw)'
+        description: 'اسم Codespace (مثلاً friendly-succotash-r6445g6x6rr2pvjw)'
         required: true
 
 jobs:
@@ -42,12 +42,11 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           NAME="${{ inputs.codespace_name }}"
-          echo "Ensuring Codespace $NAME is running..."
+          echo "Ensuring $NAME is running..."
           STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$NAME\") | .state")
           if [ "$STATE" != "Available" ]; then
             echo "Starting codespace..."
             gh codespace start -c "$NAME"
-            # Wait until Available
             for i in {1..20}; do
               STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$NAME\") | .state")
               if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
@@ -62,15 +61,15 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           NAME="${{ inputs.codespace_name }}"
+          
+          # فقط با -c (بدون --repo)
           echo "Making port 443 public..."
-          gh codespace ports visibility 443:public -c "$NAME" --repo "A-A-Softs/g2ray"
+          gh codespace ports visibility 443:public -c "$NAME"
 
           echo "Starting Xray and getting link..."
-          # مهم: CODESPACE_NAME رو قبل از اجرا ست می‌کنیم تا لینک SNI درست داشته باشه
           OUTPUT=$(gh codespace ssh -c "$NAME" -- "export CODESPACE_NAME='$NAME'; bash /usr/local/bin/start.sh")
           echo "$OUTPUT"
 
-          # استخراج لینک VLESS از خروجی
           LINK=$(echo "$OUTPUT" | grep -o 'vless://[^ ]*')
           if [ -z "$LINK" ]; then
             LINK=$(gh codespace ssh -c "$NAME" -- "export CODESPACE_NAME='$NAME'; bash /usr/local/bin/show-link.sh" 2>/dev/null | grep -o 'vless://[^ ]*')
