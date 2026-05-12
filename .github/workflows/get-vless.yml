@@ -1,1 +1,208 @@
-gh codespace ssh -c studious-meme-vr66jvr5gjr2wg55 -- "bash /usr/local/bin/start.sh && grep -o 'vless://[^ ]*' /tmp/link 2>/dev/null || (sleep 3 && grep -o 'vless://[^ ]*' /tmp/link)"
+name: VLESS via IP-SNI (read:org fix)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y curl gh uuid-runtime jq
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cat << 'EOF' >> ~/.ssh/config
+          Host *.ssh.github.com
+            User codespace
+            IdentityFile ~/.ssh/id_ed25519
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            LogLevel ERROR
+          EOF
+
+      - name: Authenticate with GitHub
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: gh auth status || gh auth login --with-token <<< "${{ secrets.PAT_TOKEN }}"
+
+      - name: Generate unique files and update fork
+        id: generate
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          set -e
+          UUID=$(uuidgen)
+          NAME="g2ray-$(openssl rand -hex 3)"
+          REPO="A-A-Softs/g2ray"
+          BRANCH="master"
+
+          upsert_file() {
+            local path="$1"
+            local content="$2"
+            local sha=$(gh api "repos/$REPO/contents/$path?ref=$BRANCH" --jq '.sha' 2>/dev/null || echo "")
+            local payload=$(jq -n --arg msg "Update $path" --arg content "$content" --arg branch "$BRANCH" \
+                             '{message: $msg, content: ($content | @base64), branch: $branch}')
+            if [ -n "$sha" ]; then
+              payload=$(echo "$payload" | jq --arg sha "$sha" '. + {sha: $sha}')
+            fi
+            gh api -X PUT "repos/$REPO/contents/$path" --input - <<< "$payload" > /dev/null
+            echo "Updated $path"
+          }
+
+          # --- CONFIG.JSON (xhttp, same as generator) ---
+          CONFIG_JSON=$(cat << XEOF
+          {
+            "log": { "loglevel": "warning" },
+            "inbounds": [{
+              "port": 443,
+              "listen": "0.0.0.0",
+              "protocol": "vless",
+              "settings": {
+                "clients": [{ "id": "$UUID" }],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "xhttp",
+                "security": "none",
+                "xhttpSettings": { "mode": "packet-up", "path": "/" }
+              }
+            }],
+            "outbounds": [{ "protocol": "freedom" }]
+          }
+          XEOF
+          )
+
+          SETUP_SH='#!/bin/sh
+          set -e
+          RELEASE="https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+          TMPDIR="$(mktemp -d)"
+          echo "[g2ray] Downloading Xray v26.3.27..."
+          curl -sL "$RELEASE" -o "$TMPDIR/xray.zip"
+          unzip -q "$TMPDIR/xray.zip" -d "$TMPDIR"
+          install -m 755 "$TMPDIR/xray" /usr/local/bin/xray
+          echo "[g2ray] Downloading GeoIP and GeoSite..."
+          curl -sL "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" -o /usr/local/bin/geoip.dat
+          curl -sL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" -o /usr/local/bin/geosite.dat
+          rm -rf "$TMPDIR"
+          echo "[g2ray] Done."'
+
+          DOCKERFILE="FROM debian:bookworm-slim
+          COPY setup.sh /tmp/setup.sh
+          COPY config.json /etc/xray/g2ray.json
+          COPY start.sh /usr/local/bin/start.sh
+          RUN apt-get update \
+              && apt-get install -y --no-install-recommends \
+                 bash curl wget unzip ca-certificates openssl \
+              && rm -rf /var/lib/apt/lists/* \
+              && mkdir -p /etc/xray \
+              && chmod +x /tmp/setup.sh \
+              && /tmp/setup.sh \
+              && rm /tmp/setup.sh \
+              && chmod +x /usr/local/bin/start.sh
+          EXPOSE 443
+          CMD [\"sleep\",\"infinity\"]"
+
+          DEVCON_JSON=$(cat << XEOF
+          {
+            "name": "$NAME",
+            "build": { "dockerfile": "Dockerfile", "context": "." },
+            "features": {
+              "ghcr.io/devcontainers/features/common-utils:2": { "installZsh": false },
+              "ghcr.io/devcontainers/features/sshd:1": { "version": "latest" }
+            },
+            "forwardPorts": [443],
+            "hostRequirements": { "cpus": 2 }
+          }
+          XEOF
+          )
+
+          START_SH='#!/bin/bash
+          echo "Starting Xray..."
+          nohup /usr/local/bin/xray run -c /etc/xray/g2ray.json &>/tmp/xray.log &
+          sleep 2
+          echo "Xray started"'
+
+          upsert_file ".devcontainer/config.json" "$CONFIG_JSON"
+          upsert_file ".devcontainer/setup.sh" "$SETUP_SH"
+          upsert_file ".devcontainer/Dockerfile" "$DOCKERFILE"
+          upsert_file ".devcontainer/devcontainer.json" "$DEVCON_JSON"
+          upsert_file ".devcontainer/start.sh" "$START_SH"
+
+          echo "uuid=$UUID" >> $GITHUB_OUTPUT
+          echo "UUID=$UUID" >> $GITHUB_ENV
+
+      - name: Create Codespace
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO="A-A-Softs/g2ray"
+          gh codespace create -R "$REPO" -b master --machine basicLinux32gb > create.log 2>&1
+          cat create.log
+          CODESPACE_NAME=$(tail -1 create.log | tr -d '[:space:]')
+          if [ -z "$CODESPACE_NAME" ]; then
+            sleep 30
+            CODESPACE_NAME=$(gh codespace list --repo "$REPO" --json name -q '.[0].name')
+          fi
+          echo "codespace_name=$CODESPACE_NAME" >> $GITHUB_OUTPUT
+          echo "CODESPACE_NAME=$CODESPACE_NAME" >> $GITHUB_ENV
+
+      - name: Make port public, start Xray, and build link
+        if: env.CODESPACE_NAME != ''
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          CODESPACE="${{ env.CODESPACE_NAME }}"
+          UUID="${{ steps.generate.outputs.uuid }}"
+          echo "Waiting for Codespace $CODESPACE..."
+          for i in {1..20}; do
+            STATE=$(gh codespace list --repo "A-A-Softs/g2ray" --json name,state -q ".[] | select(.name==\"$CODESPACE\") | .state")
+            if [ "$STATE" = "Available" ]; then echo "Ready!"; break; fi
+            sleep 15
+          done
+
+          # Wait for machine ID and make port public via API
+          echo "Waiting for machine ID..."
+          for attempt in {1..10}; do
+            MACHINE_ID=$(gh api "user/codespaces/$CODESPACE/machines" --jq '.machines[0].id' 2>/dev/null || echo "")
+            if [ -n "$MACHINE_ID" ] && [ "$MACHINE_ID" != "null" ]; then
+              echo "Machine ID: $MACHINE_ID"
+              break
+            fi
+            echo "Machine ID not ready yet, sleeping 10s..."
+            sleep 10
+          done
+          if [ -z "$MACHINE_ID" ] || [ "$MACHINE_ID" = "null" ]; then
+            echo "Could not get machine ID. Falling back to gh CLI..."
+            gh codespace ports visibility 443:public -c "$CODESPACE" || echo "Fallback failed, continuing anyway"
+          else
+            echo "Patching port 443 to public via API..."
+            gh api -X PATCH "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports/443" \
+               -f visibility=public >/dev/null
+            sleep 5
+            VIS=$(gh api "user/codespaces/$CODESPACE/machines/$MACHINE_ID/ports" --jq '.[] | select(.port==443) | .visibility')
+            echo "Port visibility: $VIS"
+          fi
+
+          # Start Xray
+          echo "Starting Xray..."
+          gh codespace ssh -c "$CODESPACE" -- "bash /usr/local/bin/start.sh"
+          sleep 5
+
+          # Build link
+          SNI="${CODESPACE}-443.app.github.dev"
+          VLESS_LINK="vless://${UUID}@94.130.50.12:443?encryption=none&security=tls&sni=${SNI}&host=${SNI}&fp=chrome&allowInsecure=1&type=xhttp&mode=packet-up&path=%2F#g2ray"
+          echo "VLESS link: $VLESS_LINK"
+          echo "$VLESS_LINK" > vless-link.txt
+          echo "### VLESS Config:" >> $GITHUB_STEP_SUMMARY
+          echo "$VLESS_LINK" >> $GITHUB_STEP_SUMMARY
+
+      - name: Output final link
+        if: env.CODESPACE_NAME != ''
+        run: |
+          echo "### Final VLESS Config:"
+          cat vless-link.txt
